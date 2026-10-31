@@ -216,6 +216,30 @@ app.post('/api/ai/chat', authAdmin, async (req,res) => {
     return res.json({ reply:data?.choices?.[0]?.message?.content || '' });
   } catch { return res.status(502).json({ error: 'AI provider is unreachable.' }); }
 });
+// Gemini TTS: API key remains on the server; returns generated WAV audio.
+app.post('/api/ai/tts', authAdmin, async (req, res) => {
+  const parsed = z.object({ text: z.string().trim().min(1).max(4000) }).safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: 'Speech text is required (max 4000 characters).' });
+  if (!process.env.AI_API_KEY) return res.status(503).json({ error: 'AI_API_KEY is not configured on the server.' });
+  const provider = (process.env.AI_PROVIDER || ((process.env.AI_BASE_URL || '').includes('generativelanguage.googleapis.com') ? 'gemini' : 'openai')).toLowerCase();
+  if (!['gemini','google'].includes(provider) && !(process.env.AI_BASE_URL || '').includes('generativelanguage.googleapis.com')) return res.status(501).json({ error: 'Gemini voice requires AI_PROVIDER=gemini.' });
+  try {
+    const base = (process.env.AI_BASE_URL || 'https://generativelanguage.googleapis.com/v1beta').replace(/\/$/, '');
+    const model = process.env.TTS_MODEL || 'gemini-2.5-flash-preview-tts';
+    const r = await fetch(`${base}/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(process.env.AI_API_KEY)}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ contents: [{ parts: [{ text: `Speak naturally in Hindi or Hinglish. Warm, friendly, clear female assistant voice named Shraddha. Conversational pace, gentle and confident. Read only the following response, without adding words:\n${parsed.data.text}` }] }],
+        generationConfig: { responseModalities: ['AUDIO'], speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: process.env.TTS_VOICE || 'Aoede' } } } } })
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) return res.status(502).json({ error: data?.error?.message || `Gemini TTS error (${r.status})` });
+    const parts = data?.candidates?.[0]?.content?.parts || [];
+    const audio = parts.find(p => p?.inlineData?.data && /^audio\//i.test(p.inlineData.mimeType || ''))?.inlineData;
+    if (!audio) return res.status(502).json({ error: 'Gemini TTS returned no audio. Check TTS model/API access.' });
+    return res.json({ audioBase64: audio.data, mimeType: audio.mimeType || 'audio/wav', voice: process.env.TTS_VOICE || 'Aoede' });
+  } catch (e) { return res.status(502).json({ error: 'Gemini TTS service is unreachable.' }); }
+});
+
 app.post('/api/payments/record-utr', (req,res) => {
   const parsed = z.object({ bookingId:z.string().min(1).max(100), amount:moneySchema, utr:z.string().min(6).max(80), method:z.enum(['upi','online','cash']).default('upi'), phone:phoneSchema.optional() }).safeParse(req.body);
   if(!parsed.success) return res.status(400).json({ error:'Booking ID, amount and UTR are required.' });
